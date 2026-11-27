@@ -61,7 +61,16 @@ done; done
   --label 改善版 output/bedrock-v2_all.json --out output/report
 ```
 
-テスト: `pytest tests/`（Bedrock はモックで、AWS なしで通る）。AWS なしで評価の仕組みだけ確かめるときは `BEDROCK_STUB=1`。
+まとめて実行するスクリプト（事前の確認 → 評価 → 方式×分割の集計・test の JH 除外の集計 → 表と図）:
+
+```bash
+cd evals/promptfoo
+./run_bedrock_eval.sh <配布のデータ>/eval_posts.jsonl --repeat 3     # 結果は output/run_<日時>/
+```
+
+テスト: `pytest tests/`（Bedrock はモックで、AWS なしで通る。CI と同じ）。リポジトリの直下で引数なしの `pytest` を実行すると、
+元から古くなっている `infra/tests/`（aws-cdk が必要で、上流の ef070f5 の時点で 3 件失敗する）も集めてしまうので、`tests/` を指定する。
+AWS なしで評価の仕組みだけ確かめるときは `BEDROCK_STUB=1`（`BEDROCK_STUB=1 ./run_bedrock_eval.sh ...` も可）。
 
 ## ④ 追加した評価用データ
 
