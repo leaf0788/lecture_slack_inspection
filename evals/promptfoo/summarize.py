@@ -96,21 +96,26 @@ def main() -> int:
     ap.add_argument("--split", choices=["dev", "test", "holdout", "all"], default="all",
                     help="dev（調整に使った投稿）・test（調整に使っていない投稿）・holdout（追加のデータ）だけを集計する")
     ap.add_argument("--source", help="データの出所で絞る（provided＝発注者のデータ、extra_posts など）")
+    ap.add_argument("--exclude-prefix", action="append", default=[], metavar="PREFIX",
+                    help="シナリオ ID がこの文字で始まる投稿を除く（例: --exclude-prefix JH。繰り返し可）。"
+                         "プロンプトの調整に正解の根拠を参考にしたシナリオを除いた値を、あわせて報告するため")
     ap.add_argument("--provider", help="結果に複数の方式があるとき、集計する方式（promptfooconfig の label）")
     ap.add_argument("--json", type=Path, help="全体と言語別の指標を JSON にも書く（CI のしきい値の確認・図の作成に使う）")
     a = ap.parse_args()
     runs = load_runs(a.results, a.provider)
-    if a.split != "all" or a.source:
+    if a.split != "all" or a.source or a.exclude_prefix:
         def keep(rec):
             v = rec["vars"]
             return ((a.split == "all" or v.get("split") == a.split)
-                    and (not a.source or v.get("source", "provided") == a.source))
+                    and (not a.source or v.get("source", "provided") == a.source)
+                    and not any(str(v.get("scenario_id", "")).startswith(x) for x in a.exclude_prefix))
         runs = [{k: r for k, r in run.items() if keep(r)} for run in runs]
     first = runs[0]
     st = confusion(first)
 
     print(f"- 結果: {', '.join(str(p) for p in a.results)}（{len(runs)} 回分。1 回目 {len(first)} 件。"
-          f"分割 {a.split}{'・出所 ' + a.source if a.source else ''}）")
+          f"分割 {a.split}{'・出所 ' + a.source if a.source else ''}"
+          f"{'・除外 ' + ','.join(a.exclude_prefix) if a.exclude_prefix else ''}）")
     print()
     header = ["言語", "件数", "取りこぼし", "誤検知", "再現率", "適合率", "F1", "通知", "判定の失敗", "再現率（失敗を取りこぼしに数えた場合）", "条文の一致"]
     print("| " + " | ".join(header) + " |")
@@ -143,7 +148,7 @@ def main() -> int:
     print()
     if a.json:
         a.json.parent.mkdir(parents=True, exist_ok=True)
-        out = {"provider": a.provider, "split": a.split, "source": a.source, "runs": len(runs), "by_language": {},
+        out = {"provider": a.provider, "split": a.split, "source": a.source, "exclude_prefix": a.exclude_prefix, "runs": len(runs), "by_language": {},
                "language_gap": {"recall": gaps.get("rec"), "precision": gaps.get("prec")}}
         for key, s in st.items():
             tp, fn, fp = s["tp"], s["fn"], s["fp"]
