@@ -192,6 +192,17 @@ def main() -> int:
     print(f"- 言語の間の一致: 6 言語がそろったシナリオ {len(full)} 件のうち、判定が全言語で同じ {len(full) - len(split)} 件（{ratio(len(full) - len(split), len(full))}）"
           + (f"。分かれたシナリオ: {', '.join(split)}" if split else ""))
 
+    # 条文の一貫性（課題 4）: 6 言語とも警告したシナリオで、付いた条文が全言語で同じ割合
+    arts: dict[str, dict[str, str | None]] = defaultdict(dict)
+    for rec in first.values():
+        v, o = rec["vars"], rec["out"]
+        if v["language"] in MAIN_LANGS and not o.get("error") and o.get("is_violation"):
+            arts[v["scenario_id"]][v["language"]] = o.get("article_id")
+    full_a = [sc for sc, d in arts.items() if len(d) == len(MAIN_LANGS)]
+    varied = sorted(sc for sc in full_a if len(set(arts[sc].values())) > 1)
+    print(f"- 条文の言語の間の一致: 6 言語とも警告したシナリオ {len(full_a)} 件のうち、条文が全言語で同じ {len(full_a) - len(varied)} 件"
+          f"（{ratio(len(full_a) - len(varied), len(full_a))}）" + (f"。分かれたシナリオ: {', '.join(varied)}" if varied else ""))
+
     # 安定性（2 回以上あるとき）
     if len(runs) > 1:
         ids = set.intersection(*(set(r) for r in runs))
