@@ -180,6 +180,28 @@ def load_api_key() -> str:
     raise RuntimeError("OPENAI_API_KEY（または .env の LLM_API_KEY）がありません")
 
 
+class StubBedrockRuntime:
+    """BEDROCK_STUB=1 のときの偽の Bedrock。AWS を呼ばずに評価の仕組み（変換・集計・CI）を確かめるためだけに使う。
+    判定は「招待リンクの有無」だけの決まった答えで、精度の評価には使えない"""
+
+    def converse(self, **req):
+        from app_inspect.services.signals import find_invite_links
+
+        text = req["messages"][-1]["content"][0]["text"]
+        warn = bool(find_invite_links(text))
+        name = req["toolConfig"]["tools"][0]["toolSpec"]["name"]
+        if name == "moderation_judgement":
+            out = {"language": "xx", "gist_ja": "stub", "stance": "doing" if warn else "neutral",
+                   "acts": ["external_group"] if warn else [], "addresses_moderator": False,
+                   "decision": "warn" if warn else "safe", "workspace_article_id": "", "reason": "stub"}
+        elif name == "warn_decision_cands":
+            out = {"decision": "warn" if warn else "safe", "candidates": ["11-xiii"], "reason": "stub"}
+        else:
+            out = {"article_id": "11-xiii", "reason": "stub"}
+        return {"output": {"message": {"content": [{"toolUse": {"toolUseId": "s", "name": name, "input": out}}]}},
+                "usage": {"inputTokens": len(text) + 1500, "outputTokens": 60}, "stopReason": "tool_use"}
+
+
 _clients: dict[tuple, RecordingClient] = {}
 _client_lock = threading.Lock()
 _patched = False
@@ -196,7 +218,9 @@ def get_client(prompts_from_head: bool = False, mode: str = "decisions", bedrock
             _patched = True
         if key not in _clients:
             if mode in BEDROCK_MODES:
-                real = BedrockChatClient(region=opts.get("region"), fallback_model_id=opts.get("fallback_model"),
+                stub = StubBedrockRuntime() if os.environ.get("BEDROCK_STUB") == "1" else None
+                real = BedrockChatClient(runtime=stub, region=opts.get("region"),
+                                         fallback_model_id=opts.get("fallback_model"),
                                          cache_system=bool(opts.get("prompt_cache", False)))
             else:
                 real = OpenAI(api_key=load_api_key(), max_retries=2, timeout=60)
