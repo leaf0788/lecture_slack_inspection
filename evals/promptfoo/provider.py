@@ -5,6 +5,7 @@ promptfooconfig.yml の providers の config:
   model: 判定のモデル（省略時は mode ごとの既定。decisions・luna は gpt-6-luna、llm_score は gpt-4o-mini）
   prompts_from_head: true なら、プロンプトを git の HEAD の版から読む（既定は false＝作業ツリーの版）
   （bedrock・bedrock_v2 のみ）region・fallback_model・prompt_cache
+  （bedrock_v2 のみ）decision_rule: either（既定）／acts／model（警告の決め方の比較。アブレーション）
 
 prompt には投稿の本文（{{text}}）が入る。output は JSON の dict（is_violation・article_id・error など。harness.detect）
 """
@@ -24,7 +25,7 @@ def call_api(prompt: str, options: dict, context: dict) -> dict:
     model = cfg.get("model") or None
     bedrock_opts = {k: cfg[k] for k in ("region", "fallback_model", "prompt_cache") if cfg.get(k) is not None}
     result = harness.detect(prompt, mode=mode, model=model, prompts_from_head=bool(cfg.get("prompts_from_head", False)),
-                            bedrock_opts=bedrock_opts)
+                            bedrock_opts=bedrock_opts, decision_rule=cfg.get("decision_rule"))
     tokens_in = sum(c.get("in", 0) for c in result["calls"])
     tokens_out = sum(c.get("out", 0) for c in result["calls"])
     cached = sum(c.get("cached", 0) or 0 for c in result["calls"])

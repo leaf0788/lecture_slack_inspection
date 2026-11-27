@@ -216,7 +216,8 @@ def cost_of(calls: list[dict]) -> float:
 
 
 def detect(text: str, mode: str = "decisions", model: str | None = None, retries: int = 2,
-           prompts_from_head: bool = False, bedrock_opts: dict | None = None) -> dict:
+           prompts_from_head: bool = False, bedrock_opts: dict | None = None,
+           decision_rule: str | None = None) -> dict:
     """本番の ViolationDetector で 1 投稿を判定し、評価用の結果を返す（判定の失敗は error に入る）"""
     model = model or MODELS[mode]
     client = get_client(prompts_from_head, mode=mode, bedrock_opts=bedrock_opts)
@@ -224,7 +225,8 @@ def detect(text: str, mode: str = "decisions", model: str | None = None, retries
     calls: list = []
     for attempt in range(retries + 1):
         _tl.calls = []
-        det = vd.ViolationDetector(openai_client=client, judge_model=model, detection_mode=mode)
+        det = vd.ViolationDetector(openai_client=client, judge_model=model, detection_mode=mode,
+                                   decision_rule=decision_rule)
         t0 = time.time()
         try:
             res = det.detect(text)
