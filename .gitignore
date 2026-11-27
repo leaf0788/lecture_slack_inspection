@@ -13,6 +13,8 @@ node_modules/
 
 # CDK
 cdk.out/
+# jsii（aws-cdk の Python）のパッケージのキャッシュ（JSII_RUNTIME_PACKAGE_CACHE_ROOT をリポジトリの中にしたとき）
+.jsii-cache/
 
 .pytest_cache/
 
