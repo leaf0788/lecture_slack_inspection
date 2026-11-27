@@ -8,6 +8,8 @@ from typing import Any, Optional
 from slack_sdk import WebClient
 from openai import OpenAI
 
+from common.bedrock_client import get_shared_client
+
 from common.observability import build_context, log_info, log_error, emit_metric, Timer
 from common.notion_client import NotionClient
 from app_inspect.services.moderation import run_moderation
@@ -35,7 +37,12 @@ def lambda_handler(event: dict, context: Any) -> dict:
 
         cfg = load_config(team_id)
         slack = WebClient(token=cfg.slack_bot_token)
-        openai_client = None if cfg.use_mock_openai else OpenAI(api_key=cfg.openai_api_key)
+        if cfg.use_mock_openai:
+            openai_client = None
+        elif getattr(cfg, "llm_provider", "openai") == "bedrock":
+            openai_client = get_shared_client()
+        else:
+            openai_client = OpenAI(api_key=cfg.openai_api_key)
         notion = NotionClient(cfg.notion_api_key, cfg.notion_db_id, cfg.notion_articles_db_id) if not dry_run else None
 
         scanned = 0
@@ -115,9 +122,10 @@ def _moderate(cfg, openai_client, text: str) -> ModerationResult:
             article_id="mock_article_123",
             method="バッチLLM",
         )
+    model = cfg.bedrock_model_id if getattr(cfg, "llm_provider", "openai") == "bedrock" else cfg.openai_model
     result = run_moderation(
         openai_client,
-        cfg.openai_model,
+        model,
         text,
     )
     if result.is_violation:

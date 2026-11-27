@@ -1,6 +1,7 @@
 import os
 from dataclasses import dataclass
 from common.secret_manager import get_secret, get_parameter_by_name
+from common.bedrock_client import bedrock_model_id, llm_provider
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,9 @@ class BatchConfig:
     max_messages_per_invoke: int
     sleep_ms: int
 
+    llm_provider: str = "openai"
+    bedrock_model_id: str = ""
+
 
 def _get_env(name: str, default: str = "") -> str:
     return os.getenv(name, default)
@@ -30,9 +34,10 @@ def load_config(team_id: str) -> BatchConfig:
     if not slack_bot_token:
         raise RuntimeError(f"Missing Slack bot token for team {team_id}.")
 
+    provider = llm_provider()
     return BatchConfig(
         slack_bot_token=slack_bot_token,
-        openai_api_key=get_secret("OPENAI_API_KEY_PARAM_NAME"),
+        openai_api_key=get_secret("OPENAI_API_KEY_PARAM_NAME") if provider == "openai" else "",
         openai_model=_get_env("OPENAI_MODEL", default="gpt-4o-mini"),
         notion_api_key=get_secret("NOTION_API_KEY_PARAM_NAME"),
         notion_db_id=_get_env("NOTION_DB_ID"),
@@ -40,4 +45,6 @@ def load_config(team_id: str) -> BatchConfig:
         use_mock_openai=_get_env("USE_MOCK_OPENAI", default="false").lower() == "true",
         max_messages_per_invoke=int(_get_env("BATCH_MAX_MESSAGES_PER_INVOKE", default="2000")),
         sleep_ms=int(_get_env("BATCH_SLEEP_MS", default="100")),
+        llm_provider=provider,
+        bedrock_model_id=bedrock_model_id(),
     )

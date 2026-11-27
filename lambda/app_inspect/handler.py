@@ -6,6 +6,7 @@ from openai import OpenAI
 from slack_sdk import WebClient
 from slack_sdk.signature import SignatureVerifier
 
+from common.bedrock_client import get_shared_client
 from common.health import write_health
 from common.notion_client import NotionClient
 from common.observability import Timer, build_context, emit_metric, log_error, log_info
@@ -64,12 +65,15 @@ def _build_moderation_executor(
             except Exception as e:
                 log_error(context, action="fetch_local_rules", error=e)
 
-            openai_client = OpenAI(api_key=cfg.openai_api_key)
+            if getattr(cfg, "llm_provider", "openai") == "bedrock":
+                llm_client, llm_model = get_shared_client(), cfg.bedrock_model_id
+            else:
+                llm_client, llm_model = OpenAI(api_key=cfg.openai_api_key), cfg.openai_model
             log_info(context, action="info_text", text=text[:20]) # 違反対象のメッセージ最初の20文字を記録
             
             result = run_moderation(
-                openai_client,
-                cfg.openai_model,
+                llm_client,
+                llm_model,
                 text,
                 extra_articles=extra_articles,
             )

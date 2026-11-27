@@ -1,6 +1,7 @@
 import os
 from dataclasses import dataclass
 from common.secret_manager import get_secret, get_parameter_by_name
+from common.bedrock_client import bedrock_model_id, llm_provider
 
 @dataclass(frozen=True)
 class InspectConfig:
@@ -20,6 +21,10 @@ class InspectConfig:
     min_severity_to_alert: str
 
     use_mock_openai: bool
+
+    # 判定に使う LLM（openai／bedrock）。bedrock のときは OpenAI の API キーを読まない
+    llm_provider: str = "openai"
+    bedrock_model_id: str = ""
 
 def load_signing_secret() -> str:
     return get_secret("SLACK_SIGNING_SECRET_PARAM_NAME")
@@ -41,10 +46,11 @@ def load_config(team_id: str) -> InspectConfig:
     if not alert_channel_id:
         raise RuntimeError(f"Missing alert channel ID for team {team_id}.")
 
+    provider = llm_provider()
     return InspectConfig(
         slack_bot_token=slack_bot_token,
         slack_signing_secret=load_signing_secret(),
-        openai_api_key=get_secret("OPENAI_API_KEY_PARAM_NAME"),
+        openai_api_key=get_secret("OPENAI_API_KEY_PARAM_NAME") if provider == "openai" else "",
         notion_api_key=get_secret("NOTION_API_KEY_PARAM_NAME"),
         alert_private_channel_id=alert_channel_id,
         notion_db_id=_get_env("NOTION_DB_ID"),
@@ -54,4 +60,6 @@ def load_config(team_id: str) -> InspectConfig:
         openai_model=_get_env("OPENAI_MODEL"),
         min_severity_to_alert=_get_env("MIN_SEVERITY_TO_ALERT"),
         use_mock_openai=_get_env("USE_MOCK_OPENAI", default="false").lower() == "true",
+        llm_provider=provider,
+        bedrock_model_id=bedrock_model_id(),
     )

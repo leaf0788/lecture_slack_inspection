@@ -243,3 +243,24 @@ def build_bedrock_client_from_env(**overrides) -> BedrockChatClient:
     )
     kw.update(overrides)
     return BedrockChatClient(**kw)
+
+
+_shared: Optional[BedrockChatClient] = None
+
+
+def get_shared_client() -> BedrockChatClient:
+    """Lambda のコンテナの間で使い回す（呼び出しのたびに boto3 のクライアントを作らない）"""
+    global _shared
+    if _shared is None:
+        _shared = build_bedrock_client_from_env()
+    return _shared
+
+
+def llm_provider() -> str:
+    """環境変数 LLM_PROVIDER（openai／bedrock）。既定は openai（今の本番のまま）"""
+    v = (os.environ.get("LLM_PROVIDER") or "openai").strip().lower()
+    return v if v in ("openai", "bedrock") else "openai"
+
+
+def bedrock_model_id() -> str:
+    return os.environ.get("BEDROCK_MODEL_ID") or DEFAULT_MODEL_ID
