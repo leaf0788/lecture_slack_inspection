@@ -145,8 +145,33 @@ class InfraStack(Stack):
             "DetectionMode",
             type="String",
             default="auto",
-            allowed_values=["auto", "llm_score", "decisions", "luna"],
-            description="Violation detection mode (auto, llm_score, decisions, luna; auto resolves to llm_score if OPENAI_MODEL is gpt-4o-mini, otherwise decisions).",
+            allowed_values=["auto", "llm_score", "decisions", "luna", "bedrock", "bedrock_v2"],
+            description="Violation detection mode (auto, llm_score, decisions, luna, bedrock, bedrock_v2; auto resolves to bedrock if LlmProvider is bedrock, llm_score if OPENAI_MODEL is gpt-4o-mini, otherwise decisions).",
+        )
+
+        llm_provider = CfnParameter(
+            self,
+            "LlmProvider",
+            type="String",
+            default="openai",
+            allowed_values=["openai", "bedrock"],
+            description="LLM provider for violation detection (openai or bedrock). bedrock does not read the OpenAI API key.",
+        )
+
+        bedrock_model_id = CfnParameter(
+            self,
+            "BedrockModelId",
+            type="String",
+            default="apac.amazon.nova-lite-v1:0",
+            description="Bedrock model ID or inference profile ID for detection (e.g. apac.amazon.nova-lite-v1:0).",
+        )
+
+        bedrock_fallback_model_id = CfnParameter(
+            self,
+            "BedrockFallbackModelId",
+            type="String",
+            default="apac.amazon.nova-micro-v1:0",
+            description="Bedrock model used when the primary model keeps throttling (separate quota). Empty to disable.",
         )
 
         min_severity_to_alert = CfnParameter(
@@ -205,6 +230,11 @@ class InfraStack(Stack):
                 "NOTION_WS_LIST_DB_ID": notion_ws_list_db_id.value_as_string,
                 "OPENAI_MODEL": openai_model.value_as_string,
                 "DETECTION_MODE": detection_mode.value_as_string,
+                "LLM_PROVIDER": llm_provider.value_as_string,
+                "BEDROCK_MODEL_ID": bedrock_model_id.value_as_string,
+                "BEDROCK_FALLBACK_MODEL_ID": bedrock_fallback_model_id.value_as_string,
+                "BEDROCK_PROMPT_CACHE": "true",
+                "NOTIFY_ON_UNDETERMINED": "true",
                 "MIN_SEVERITY_TO_ALERT": min_severity_to_alert.value_as_string,
                 "USE_MOCK_OPENAI": "false",
             },
@@ -330,6 +360,11 @@ class InfraStack(Stack):
                 "NOTION_DB_ID": notion_db_id.value_as_string,
                 "NOTION_ARTICLES_DB_ID": notion_articles_db_id.value_as_string,
                 "DETECTION_MODE": detection_mode.value_as_string,
+                "LLM_PROVIDER": llm_provider.value_as_string,
+                "BEDROCK_MODEL_ID": bedrock_model_id.value_as_string,
+                "BEDROCK_FALLBACK_MODEL_ID": bedrock_fallback_model_id.value_as_string,
+                "BEDROCK_PROMPT_CACHE": "true",
+                "NOTIFY_ON_UNDETERMINED": "true",
                 "USE_MOCK_OPENAI": "false",
                 "BATCH_MAX_MESSAGES_PER_INVOKE": "2000",
                 "BATCH_SLEEP_MS": "100",
@@ -381,6 +416,18 @@ class InfraStack(Stack):
                 get_param_arn(notion_api_key_param_name.value_as_string),
             ],
         )
+
+        # Bedrock での判定（LlmProvider=bedrock）。基盤モデルと推論プロファイルの両方を呼べるようにする
+        # （クロスリージョン推論プロファイルは、行き先のリージョンの基盤モデルの権限も要る）
+        bedrock_policy = iam.PolicyStatement(
+            actions=["bedrock:InvokeModel"],
+            resources=[
+                "arn:aws:bedrock:*::foundation-model/amazon.nova-*",
+                f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/*",
+            ],
+        )
+        lambda_a.add_to_role_policy(bedrock_policy)
+        lambda_e.add_to_role_policy(bedrock_policy)
 
         lambda_a.add_to_role_policy(runtime_policy)
         lambda_b.add_to_role_policy(runtime_policy)
