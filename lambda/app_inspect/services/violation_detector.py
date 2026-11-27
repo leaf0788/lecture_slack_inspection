@@ -124,13 +124,15 @@ class ViolationDetector:
         mode = mode_raw.strip().lower() if mode_raw else ""
         if not mode:
             mode = "auto"
-        elif mode not in ("auto", "llm_score", "decisions", "luna"):
+        elif mode not in ("auto", "llm_score", "decisions", "luna", "bedrock"):
             logger.warning("Unknown detection mode '%s', falling back to 'auto'", mode_raw)
             mode = "auto"
 
         if mode == "auto":
             judge_model_norm = (self.judge_model or "").strip().lower()
-            if judge_model_norm.startswith("gpt-4o-mini"):
+            if getattr(openai_client, "provider", None) == "bedrock":
+                resolved_mode = "bedrock"
+            elif judge_model_norm.startswith("gpt-4o-mini"):
                 resolved_mode = "llm_score"
             else:
                 resolved_mode = "decisions"
@@ -181,6 +183,11 @@ class ViolationDetector:
         elif self.detection_mode == "luna":
             result = self._judge_by_chat_pipeline(text, articles)
             method = "Luna"
+        elif self.detection_mode == "bedrock":
+            # Bedrock 版ベースライン: 経路 B（通常の呼び出しで「警告すべきか」と条文の候補 → 条文の選択）を
+            # そのまま Bedrock のモデルで動かす。client は common.bedrock_client.BedrockChatClient
+            result = self._judge_by_chat_pipeline(text, articles)
+            method = "Bedrock"
         else:
             result = self._judge_by_llm(text, articles)
             method = "LLM"
