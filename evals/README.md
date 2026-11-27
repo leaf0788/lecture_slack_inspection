@@ -137,6 +137,17 @@ npx promptfoo view
 
 ---
 
+## Bedrock（ベースライン `bedrock`・改善版 `bedrock_v2`）
+
+- 設定: `promptfooconfig.bedrock.yml`（`bedrock-baseline`・`bedrock-v2`・`bedrock-v2-micro` を並べる）。OpenAI のキーは不要で、認証は boto3 の標準（`AWS_PROFILE` など）
+- 実行: `npx promptfoo eval -c promptfooconfig.bedrock.yml --no-cache -o output/bedrock.json`（1 方式だけなら `--filter-providers '^bedrock-v2$'`）
+- 集計: 1 つの結果に複数の方式があるので `summarize.py output/bedrock.json --provider bedrock-v2` のように方式を選ぶ。`--split dev|test|holdout` で分割ごと、`--json` で JSON も書く
+- 分割: `load_dataset.py` が `split` を付ける。提供のデータはシナリオ単位・種類ごとに層別して dev/test（177/177）、2 つ目以降に渡した追加のデータ（`../datasets_extra/extra_posts.jsonl`）は holdout
+- 図と表: `report.py --openai-reference --label ベースライン a.json --label 改善版 b.json`
+- AWS なしで仕組みだけ確かめる: `BEDROCK_STUB=1`（招待リンクの有無だけで答える偽の Bedrock。精度の評価には使えない）
+- CI: `.github/workflows/eval.yml`。しきい値は `../thresholds.json`、確かめるのは `gate.py`
+- 単価: `harness.py` の `PRICES`（Nova Micro / Lite の公開価格。リージョンで違う場合は直す）
+
 ## 注意
 
 - データセットと結果（`datasets/`・`output/`）は commit しない。結果には投稿の本文が入る
