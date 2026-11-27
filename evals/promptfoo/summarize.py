@@ -26,11 +26,24 @@ def lang_group(lang: str) -> str:
     return lang if lang in MAIN_LANGS else "mixed"
 
 
-def load_runs(paths: list[Path]) -> list[dict[str, dict]]:
-    """結果を「回」ごとの {id: 1 件} に分ける（同じファイルの中の繰り返しも別の回にする）"""
+def provider_label(it: dict) -> str:
+    p = it.get("provider") or {}
+    return (p.get("label") or p.get("id") or "") if isinstance(p, dict) else str(p)
+
+
+def load_runs(paths: list[Path], provider: str | None = None) -> list[dict[str, dict]]:
+    """結果を「回」ごとの {id: 1 件} に分ける（同じファイルの中の繰り返しも別の回にする）。
+    1 つの結果に複数のプロバイダー（方式）があるときは provider（label）で 1 つに絞る"""
     by_run: dict[tuple[int, int], dict[str, dict]] = defaultdict(dict)
     for fi, p in enumerate(paths):
         items = json.loads(p.read_text(encoding="utf-8"))["results"]["results"]
+        labels = sorted({provider_label(it) for it in items})
+        if provider:
+            items = [it for it in items if provider_label(it) == provider]
+            if not items:
+                raise SystemExit(f"{p}: プロバイダー {provider!r} の結果が無い（ある: {labels}）")
+        elif len(labels) > 1:
+            raise SystemExit(f"{p}: 複数の方式の結果がある {labels}。--provider で 1 つを選ぶ")
         seen: dict[str, int] = defaultdict(int)
         for it in items:
             v = it["vars"]
@@ -80,12 +93,29 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("results", nargs="+", type=Path)
     ap.add_argument("--csv", type=Path, help="言語別の表を CSV にも書く")
+    ap.add_argument("--split", choices=["dev", "test", "holdout", "all"], default="all",
+                    help="dev（調整に使った投稿）・test（調整に使っていない投稿）・holdout（追加のデータ）だけを集計する")
+    ap.add_argument("--source", help="データの出所で絞る（provided＝発注者のデータ、extra_posts など）")
+    ap.add_argument("--exclude-prefix", action="append", default=[], metavar="PREFIX",
+                    help="シナリオ ID がこの文字で始まる投稿を除く（例: --exclude-prefix JH。繰り返し可）。"
+                         "プロンプトの調整に正解の根拠を参考にしたシナリオを除いた値を、あわせて報告するため")
+    ap.add_argument("--provider", help="結果に複数の方式があるとき、集計する方式（promptfooconfig の label）")
+    ap.add_argument("--json", type=Path, help="全体と言語別の指標を JSON にも書く（CI のしきい値の確認・図の作成に使う）")
     a = ap.parse_args()
-    runs = load_runs(a.results)
+    runs = load_runs(a.results, a.provider)
+    if a.split != "all" or a.source or a.exclude_prefix:
+        def keep(rec):
+            v = rec["vars"]
+            return ((a.split == "all" or v.get("split") == a.split)
+                    and (not a.source or v.get("source", "provided") == a.source)
+                    and not any(str(v.get("scenario_id", "")).startswith(x) for x in a.exclude_prefix))
+        runs = [{k: r for k, r in run.items() if keep(r)} for run in runs]
     first = runs[0]
     st = confusion(first)
 
-    print(f"- 結果: {', '.join(str(p) for p in a.results)}（{len(runs)} 回分。1 回目 {len(first)} 件）")
+    print(f"- 結果: {', '.join(str(p) for p in a.results)}（{len(runs)} 回分。1 回目 {len(first)} 件。"
+          f"分割 {a.split}{'・出所 ' + a.source if a.source else ''}"
+          f"{'・除外 ' + ','.join(a.exclude_prefix) if a.exclude_prefix else ''}）")
     print()
     header = ["言語", "件数", "取りこぼし", "誤検知", "再現率", "適合率", "F1", "通知", "判定の失敗", "再現率（失敗を取りこぼしに数えた場合）", "条文の一致"]
     print("| " + " | ".join(header) + " |")
@@ -103,6 +133,34 @@ def main() -> int:
                ratio(tp, tp + fn + s["err_pos"]), f"{s['art_ok']}/{s['art_n']}"]
         rows.append(row)
         print("| " + " | ".join(str(x) for x in row) + " |")
+    # 言語による差（課題 2）: 主な 6 言語の再現率・適合率の最大と最小の差
+    def _r(s, kind):
+        tp, fn, fp = s["tp"], s["fn"], s["fp"]
+        d = tp + fn if kind == "rec" else tp + fp
+        return tp / d if d else None
+    gaps = {}
+    for kind, label in (("rec", "再現率"), ("prec", "適合率")):
+        vals = {k: _r(st[k], kind) for k in MAIN_LANGS if k in st and _r(st[k], kind) is not None}
+        if vals:
+            hi, lo = max(vals, key=vals.get), min(vals, key=vals.get)
+            gaps[kind] = vals[hi] - vals[lo]
+            print(f"\n- 言語による{label}の差: 最大 {hi} {vals[hi]:.3f} − 最小 {lo} {vals[lo]:.3f} = {gaps[kind]:.3f}", end="")
+    print()
+    if a.json:
+        a.json.parent.mkdir(parents=True, exist_ok=True)
+        out = {"provider": a.provider, "split": a.split, "source": a.source, "exclude_prefix": a.exclude_prefix, "runs": len(runs), "by_language": {},
+               "language_gap": {"recall": gaps.get("rec"), "precision": gaps.get("prec")}}
+        for key, s in st.items():
+            tp, fn, fp = s["tp"], s["fn"], s["fp"]
+            out["by_language"][key] = {"n": s["n"], "tp": tp, "fn": fn, "fp": fp, "tn": s["tn"], "errors": s["err"],
+                                       "recall": tp / (tp + fn) if tp + fn else None,
+                                       "precision": tp / (tp + fp) if tp + fp else None,
+                                       "article_ok": s["art_ok"], "article_n": s["art_n"]}
+        ok_ = [rec["out"] for rec in first.values() if not rec["out"].get("error")]
+        lat_ = [o["latency_sec"] for o in ok_ if o.get("latency_sec") is not None]
+        out["latency_sec"] = {"p50": statistics.median(lat_) if lat_ else None, "p95": pct(lat_, 0.95) if lat_ else None}
+        out["cost_per_post_usd"] = (sum(o["cost_usd"] for o in ok_) / len(ok_)) if ok_ else None
+        a.json.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
     if a.csv:
         a.csv.parent.mkdir(parents=True, exist_ok=True)
         with open(a.csv, "w", encoding="utf-8", newline="") as f:
@@ -138,6 +196,17 @@ def main() -> int:
     print()
     print(f"- 言語の間の一致: 6 言語がそろったシナリオ {len(full)} 件のうち、判定が全言語で同じ {len(full) - len(split)} 件（{ratio(len(full) - len(split), len(full))}）"
           + (f"。分かれたシナリオ: {', '.join(split)}" if split else ""))
+
+    # 条文の一貫性（課題 4）: 6 言語とも警告したシナリオで、付いた条文が全言語で同じ割合
+    arts: dict[str, dict[str, str | None]] = defaultdict(dict)
+    for rec in first.values():
+        v, o = rec["vars"], rec["out"]
+        if v["language"] in MAIN_LANGS and not o.get("error") and o.get("is_violation"):
+            arts[v["scenario_id"]][v["language"]] = o.get("article_id")
+    full_a = [sc for sc, d in arts.items() if len(d) == len(MAIN_LANGS)]
+    varied = sorted(sc for sc in full_a if len(set(arts[sc].values())) > 1)
+    print(f"- 条文の言語の間の一致: 6 言語とも警告したシナリオ {len(full_a)} 件のうち、条文が全言語で同じ {len(full_a) - len(varied)} 件"
+          f"（{ratio(len(full_a) - len(varied), len(full_a))}）" + (f"。分かれたシナリオ: {', '.join(varied)}" if varied else ""))
 
     # 安定性（2 回以上あるとき）
     if len(runs) > 1:

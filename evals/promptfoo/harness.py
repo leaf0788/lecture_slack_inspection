@@ -31,19 +31,37 @@ import requests  # noqa: E402
 from openai import OpenAI  # noqa: E402
 
 import app_inspect.services.violation_detector as vd  # noqa: E402
+from common.bedrock_client import BedrockChatClient  # noqa: E402
 
-MODELS = {"decisions": "gpt-6-luna", "luna": "gpt-6-luna", "llm_score": "gpt-4o-mini"}
+# Bedrock の既定のモデル。東京リージョンでは APAC のクロスリージョン推論プロファイルを使う
+# （環境に合わせて promptfooconfig.yml の config.model か、環境変数 BEDROCK_MODEL_ID で替える）
+BEDROCK_DEFAULT_MODEL = os.environ.get("BEDROCK_MODEL_ID", "apac.amazon.nova-lite-v1:0")
+BEDROCK_MODES = {"bedrock", "bedrock_v2"}
+MODELS = {"decisions": "gpt-6-luna", "luna": "gpt-6-luna", "llm_score": "gpt-4o-mini",
+          "bedrock": BEDROCK_DEFAULT_MODEL, "bedrock_v2": BEDROCK_DEFAULT_MODEL}
 ERROR_PREFIX = "LLM判定エラー"
 TRANSIENT_STATUS = {429, 500, 502, 503, 504}
 RETRY_WAIT_SEC = 3.0
 MAX_TRANSIENT_RETRIES = 3
 
 # USD / 100 万トークン（docs/research/20261013_detection_model_migration.md の 6.2）
+# Amazon Nova はオンデマンドの公開価格（https://aws.amazon.com/bedrock/pricing/ 。キャッシュの読み出しは 75% 引き）。
+# リージョン・推論プロファイルで変わることがあるので、評価の前に料金ページで確かめて直す
 PRICES = {
     ("decisions", "gpt-6-luna"): {"in": 0.10, "cached": 0.10, "out": 0.0},
     ("chat", "gpt-6-luna"): {"in": 0.10, "cached": 0.01, "out": 0.50},
     ("chat", "gpt-4o-mini"): {"in": 0.15, "cached": 0.075, "out": 0.60},
+    ("chat", "amazon.nova-micro-v1:0"): {"in": 0.035, "cached": 0.00875, "out": 0.14},
+    ("chat", "amazon.nova-lite-v1:0"): {"in": 0.06, "cached": 0.015, "out": 0.24},
 }
+
+
+def _price_key(api: str, model: str | None) -> tuple[str, str]:
+    """推論プロファイルの接頭辞（apac. / us. / jp. など）を外して単価を引く"""
+    m = model or ""
+    if ".amazon." in m:
+        m = m.split(".", 1)[1]
+    return api, m
 
 _tl = threading.local()
 
@@ -63,7 +81,8 @@ class _Completions:
         resp = self._real.create(**kw)
         u = resp.usage
         cached = getattr(getattr(u, "prompt_tokens_details", None), "cached_tokens", 0) or 0
-        _calls().append({"api": "chat", "model": kw.get("model"), "in": u.prompt_tokens, "cached": cached,
+        _calls().append({"api": "chat", "model": getattr(resp, "model", None) or kw.get("model"),
+                         "in": u.prompt_tokens, "cached": cached,
                          "out": u.completion_tokens, "sec": round(time.time() - t0, 3)})
         return resp
 
@@ -74,11 +93,12 @@ class _Chat:
 
 
 class RecordingClient:
-    """openai.OpenAI の代わり。ViolationDetector は api_key と chat.completions.create だけを使う"""
+    """openai.OpenAI（または BedrockChatClient）の代わり。ViolationDetector は api_key と chat.completions.create だけを使う"""
 
-    def __init__(self, real: OpenAI):
+    def __init__(self, real):
         self._real = real
         self.api_key = real.api_key
+        self.provider = getattr(real, "provider", "openai")
         self.chat = _Chat(real.chat)
 
 
@@ -160,23 +180,58 @@ def load_api_key() -> str:
     raise RuntimeError("OPENAI_API_KEY（または .env の LLM_API_KEY）がありません")
 
 
-_client = None
+class StubBedrockRuntime:
+    """BEDROCK_STUB=1 のときの偽の Bedrock。AWS を呼ばずに評価の仕組み（変換・集計・CI）を確かめるためだけに使う。
+    判定は「招待リンクの有無」だけの決まった答えで、精度の評価には使えない"""
+
+    def converse(self, **req):
+        from app_inspect.services.signals import find_invite_links
+
+        text = req["messages"][-1]["content"][0]["text"]
+        warn = bool(find_invite_links(text))
+        name = req["toolConfig"]["tools"][0]["toolSpec"]["name"]
+        if name == "moderation_judgement":
+            out = {"language": "xx", "gist_ja": "stub", "stance": "doing" if warn else "neutral",
+                   "acts": ["external_group"] if warn else [], "addresses_moderator": False,
+                   "decision": "warn" if warn else "safe", "workspace_article_id": "", "reason": "stub"}
+        elif name == "warn_decision_cands":
+            out = {"decision": "warn" if warn else "safe", "candidates": ["11-xiii"], "reason": "stub"}
+        else:
+            out = {"article_id": "11-xiii", "reason": "stub"}
+        return {"output": {"message": {"content": [{"toolUse": {"toolUseId": "s", "name": name, "input": out}}]}},
+                "usage": {"inputTokens": len(text) + 1500, "outputTokens": 60}, "stopReason": "tool_use"}
+
+
+_clients: dict[tuple, RecordingClient] = {}
 _client_lock = threading.Lock()
+_patched = False
 
 
-def get_client(prompts_from_head: bool = False) -> RecordingClient:
-    global _client
+def get_client(prompts_from_head: bool = False, mode: str = "decisions", bedrock_opts: dict | None = None) -> RecordingClient:
+    """方式ごとにクライアントを 1 つ作って使い回す。Bedrock の認証は boto3 の標準（環境変数・プロファイル・SSO）"""
+    global _patched
+    opts = bedrock_opts or {}
+    key = ("bedrock", tuple(sorted(opts.items()))) if mode in BEDROCK_MODES else ("openai",)
     with _client_lock:
-        if _client is None:
+        if not _patched:
             install_patches(prompts_from_head)
-            _client = RecordingClient(OpenAI(api_key=load_api_key(), max_retries=2, timeout=60))
-    return _client
+            _patched = True
+        if key not in _clients:
+            if mode in BEDROCK_MODES:
+                stub = StubBedrockRuntime() if os.environ.get("BEDROCK_STUB") == "1" else None
+                real = BedrockChatClient(runtime=stub, region=opts.get("region"),
+                                         fallback_model_id=opts.get("fallback_model"),
+                                         cache_system=bool(opts.get("prompt_cache", False)))
+            else:
+                real = OpenAI(api_key=load_api_key(), max_retries=2, timeout=60)
+            _clients[key] = RecordingClient(real)
+    return _clients[key]
 
 
 def cost_of(calls: list[dict]) -> float:
     total = 0.0
     for c in calls:
-        p = PRICES.get((c.get("api"), c.get("model")))
+        p = PRICES.get((c.get("api"), c.get("model"))) or PRICES.get(_price_key(c.get("api"), c.get("model")))
         if not p:
             continue
         cached = c.get("cached", 0) or 0
@@ -185,15 +240,17 @@ def cost_of(calls: list[dict]) -> float:
 
 
 def detect(text: str, mode: str = "decisions", model: str | None = None, retries: int = 2,
-           prompts_from_head: bool = False) -> dict:
+           prompts_from_head: bool = False, bedrock_opts: dict | None = None,
+           decision_rule: str | None = None) -> dict:
     """本番の ViolationDetector で 1 投稿を判定し、評価用の結果を返す（判定の失敗は error に入る）"""
     model = model or MODELS[mode]
-    client = get_client(prompts_from_head)
+    client = get_client(prompts_from_head, mode=mode, bedrock_opts=bedrock_opts)
     last_err = ""
     calls: list = []
     for attempt in range(retries + 1):
         _tl.calls = []
-        det = vd.ViolationDetector(openai_client=client, judge_model=model, detection_mode=mode)
+        det = vd.ViolationDetector(openai_client=client, judge_model=model, detection_mode=mode,
+                                   decision_rule=decision_rule)
         t0 = time.time()
         try:
             res = det.detect(text)
@@ -202,13 +259,15 @@ def detect(text: str, mode: str = "decisions", model: str | None = None, retries
             continue
         sec = round(time.time() - t0, 3)
         calls = list(_tl.calls)
-        if res.reason.startswith(ERROR_PREFIX):
+        # bedrock_v2 は判定の失敗を「判定できなかった」（method=Undetermined）として通知に回す。評価では失敗として数える
+        if res.reason.startswith(ERROR_PREFIX) or res.method == "Undetermined":
             last_err = res.reason[:300]
             continue
         dec = next((c for c in calls if c.get("api") == "decisions" and c.get("status") == 200), {})
         return {"error": None, "is_violation": bool(res.is_violation), "article_id": res.article_id,
                 "confidence": res.confidence, "method": res.method, "latency_sec": sec,
                 "attempts": attempt + 1, "p_warn": dec.get("p_warn"), "article_top3": dec.get("article_top3"),
+                "signals": getattr(det, "last_signals", None),
                 "calls": calls, "cost_usd": round(cost_of(calls), 7)}
     return {"error": last_err, "is_violation": None, "article_id": None, "confidence": None, "method": None,
             "latency_sec": None, "attempts": retries + 1, "p_warn": None, "article_top3": None,

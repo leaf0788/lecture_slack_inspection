@@ -1,0 +1,92 @@
+name: eval (violation detection)
+
+# プロンプト・判定の処理・評価の仕組みを変えたときに、違反検知の評価を自動で走らせる（発注書 O-5）
+# - pipeline: AWS を使わずに（BEDROCK_STUB=1）評価の変換・集計・しきい値の確認が動くかを確かめる。常に走る
+# - bedrock: リポジトリにある追加の評価用データ（架空の投稿 60 件。evals/datasets_extra）を、Bedrock の改善版で実際に判定し、
+#   evals/thresholds.json の holdout のしきい値（再現率を最優先）を下回ったら落とす。
+#   secrets.AWS_EVAL_ROLE_ARN（GitHub の OIDC で引き受ける IAM ロール。bedrock:InvokeModel だけを許す）が無いときは飛ばす
+#   提供のデータセット（354 件）はリポジトリに置かない約束なので、CI では使わない（手元で測る。evals/README.md）
+
+on:
+  pull_request:
+    paths:
+      - "lambda/app_inspect/services/**"
+      - "lambda/common/bedrock_client.py"
+      - "lambda/common/data/articles.json"
+      - "evals/**"
+      - ".github/workflows/eval.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # AWS の OIDC 用
+
+concurrency:
+  group: eval-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PROMPTFOO_DISABLE_TELEMETRY: "1"
+      PROMPTFOO_DISABLE_UPDATE: "1"
+      HAS_AWS_ROLE: ${{ secrets.AWS_EVAL_ROLE_ARN != '' }}
+      AWS_REGION: ${{ vars.EVAL_AWS_REGION || 'ap-northeast-1' }}
+    defaults:
+      run:
+        working-directory: evals/promptfoo
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: evals/package-lock.json
+
+      - name: Install
+        run: |
+          python -m pip install -r ../../lambda/requirements.txt pyyaml
+          (cd .. && npm ci)
+          echo "PROMPTFOO_PYTHON=$(which python)" >> "$GITHUB_ENV"
+
+      - name: Build test cases (extra posts, holdout)
+        run: python load_dataset.py ../datasets_extra/extra_posts.jsonl --output datasets/ci.yaml
+
+      - name: Pipeline check (no AWS)
+        env:
+          BEDROCK_STUB: "1"
+        run: |
+          npx promptfoo eval -c promptfooconfig.bedrock.yml --filter-providers '^bedrock-v2$' \
+            -t datasets/ci.yaml --no-cache -o output/stub.json || true
+          python summarize.py output/stub.json --split holdout --json output/stub_summary.json > /dev/null
+          python gate.py output/stub_summary.json ../thresholds.json --profile stub
+
+      - name: Configure AWS credentials (OIDC)
+        if: env.HAS_AWS_ROLE == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_EVAL_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Evaluate with Bedrock (improved method)
+        if: env.HAS_AWS_ROLE == 'true'
+        run: |
+          # promptfoo は不合格の投稿があると終了コードが 0 でないので、合否は gate.py で決める
+          npx promptfoo eval -c promptfooconfig.bedrock.yml --filter-providers '^bedrock-v2$' \
+            -t datasets/ci.yaml --no-cache -o output/ci.json || true
+          python summarize.py output/ci.json --split holdout --json output/ci_summary.json > output/ci_summary.md
+          cat output/ci_summary.md >> "$GITHUB_STEP_SUMMARY"
+          python gate.py output/ci_summary.json ../thresholds.json --profile holdout | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Skip notice
+        if: env.HAS_AWS_ROLE != 'true'
+        run: echo "secrets.AWS_EVAL_ROLE_ARN が無いので、Bedrock での評価は飛ばした（pipeline の確認だけ）" >> "$GITHUB_STEP_SUMMARY"

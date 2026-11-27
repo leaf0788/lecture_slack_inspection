@@ -1,0 +1,61 @@
+# Bedrock 版の評価（ベースラインと改善版を同じデータ・同じ指標で並べる）
+# 使い方: npx promptfoo eval -c promptfooconfig.bedrock.yml --no-cache -o output/bedrock.json
+#   片方だけ: --filter-providers bedrock-baseline
+# 認証は boto3 の標準（講座の AWS 環境の認証情報。AWS_PROFILE など）。リージョンは config.region か AWS_REGION
+description: slack inspection - Bedrock baseline vs improved (PJT04 dataset)
+
+providers:
+  # M-3: 現行の判定方式（新方式の経路 B）をそのまま Bedrock で動かしたもの
+  - id: file://provider.py
+    label: bedrock-baseline
+    config:
+      mode: bedrock
+      model: apac.amazon.nova-lite-v1:0
+      region: ap-northeast-1
+      workers: 4
+  # M-4: 改善版（1 回の呼び出しで「行為の分類 → 警告の判断」。条文はコードで対応付け）
+  - id: file://provider.py
+    label: bedrock-v2
+    config:
+      mode: bedrock_v2
+      model: apac.amazon.nova-lite-v1:0
+      region: ap-northeast-1
+      prompt_cache: true
+      workers: 4
+  # 費用の比較用（同じ改善版を Nova Micro で）。使わないときは消すか --filter-providers で外す
+  - id: file://provider.py
+    label: bedrock-v2-micro
+    config:
+      mode: bedrock_v2
+      model: apac.amazon.nova-micro-v1:0
+      region: ap-northeast-1
+      prompt_cache: true
+      workers: 4
+
+prompts:
+  - "{{text}}"
+
+defaultTest:
+  assert:
+    - type: javascript
+      metric: Detection
+      value: |
+        if (output.error) {
+          return { pass: false, score: 0, reason: `判定の失敗: ${output.error}` };
+        }
+        const ok = output.is_violation === context.vars.expected_is_violation;
+        return { pass: ok, score: ok ? 1 : 0,
+                 reason: `expected=${context.vars.expected_is_violation} got=${output.is_violation} (${output.method})` };
+    - type: javascript
+      metric: Article
+      weight: 0
+      value: |
+        if (output.error || !context.vars.expected_is_violation || !output.is_violation) {
+          return { pass: true, score: 1, reason: '対象外' };
+        }
+        const ok = output.article_id === context.vars.expected_article;
+        return { pass: true, score: ok ? 1 : 0,
+                 reason: `expected=${context.vars.expected_article} got=${output.article_id}` };
+
+tests:
+  - file://datasets/testcases.yaml

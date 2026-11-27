@@ -32,9 +32,11 @@ def run_moderation(
         )
         result = detector.detect(message_text, extra_articles=extra_articles)
 
+        # 「判定できなかった」（O-4）は確信度 0 でも、MIN_SEVERITY_TO_ALERT で落ちないように high で通知する
+        severity = "high" if result.method == "Undetermined" else _confidence_to_severity(result.confidence)
         return normalize_result({
             "is_violation": result.is_violation,
-            "severity": _confidence_to_severity(result.confidence),
+            "severity": severity,
             "categories": [result.category] if result.category else [],
             "rationale": result.reason,
             "recommended_reply": "",
