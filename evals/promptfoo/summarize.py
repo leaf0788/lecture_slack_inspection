@@ -26,11 +26,24 @@ def lang_group(lang: str) -> str:
     return lang if lang in MAIN_LANGS else "mixed"
 
 
-def load_runs(paths: list[Path]) -> list[dict[str, dict]]:
-    """結果を「回」ごとの {id: 1 件} に分ける（同じファイルの中の繰り返しも別の回にする）"""
+def provider_label(it: dict) -> str:
+    p = it.get("provider") or {}
+    return (p.get("label") or p.get("id") or "") if isinstance(p, dict) else str(p)
+
+
+def load_runs(paths: list[Path], provider: str | None = None) -> list[dict[str, dict]]:
+    """結果を「回」ごとの {id: 1 件} に分ける（同じファイルの中の繰り返しも別の回にする）。
+    1 つの結果に複数のプロバイダー（方式）があるときは provider（label）で 1 つに絞る"""
     by_run: dict[tuple[int, int], dict[str, dict]] = defaultdict(dict)
     for fi, p in enumerate(paths):
         items = json.loads(p.read_text(encoding="utf-8"))["results"]["results"]
+        labels = sorted({provider_label(it) for it in items})
+        if provider:
+            items = [it for it in items if provider_label(it) == provider]
+            if not items:
+                raise SystemExit(f"{p}: プロバイダー {provider!r} の結果が無い（ある: {labels}）")
+        elif len(labels) > 1:
+            raise SystemExit(f"{p}: 複数の方式の結果がある {labels}。--provider で 1 つを選ぶ")
         seen: dict[str, int] = defaultdict(int)
         for it in items:
             v = it["vars"]
@@ -80,12 +93,24 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("results", nargs="+", type=Path)
     ap.add_argument("--csv", type=Path, help="言語別の表を CSV にも書く")
+    ap.add_argument("--split", choices=["dev", "test", "all"], default="all",
+                    help="dev（調整に使った投稿）か test（調整に使っていない投稿）だけを集計する")
+    ap.add_argument("--source", help="データの出所で絞る（provided＝発注者のデータ、extra_posts など）")
+    ap.add_argument("--provider", help="結果に複数の方式があるとき、集計する方式（promptfooconfig の label）")
+    ap.add_argument("--json", type=Path, help="全体と言語別の指標を JSON にも書く（CI のしきい値の確認・図の作成に使う）")
     a = ap.parse_args()
-    runs = load_runs(a.results)
+    runs = load_runs(a.results, a.provider)
+    if a.split != "all" or a.source:
+        def keep(rec):
+            v = rec["vars"]
+            return ((a.split == "all" or v.get("split") == a.split)
+                    and (not a.source or v.get("source", "provided") == a.source))
+        runs = [{k: r for k, r in run.items() if keep(r)} for run in runs]
     first = runs[0]
     st = confusion(first)
 
-    print(f"- 結果: {', '.join(str(p) for p in a.results)}（{len(runs)} 回分。1 回目 {len(first)} 件）")
+    print(f"- 結果: {', '.join(str(p) for p in a.results)}（{len(runs)} 回分。1 回目 {len(first)} 件。"
+          f"分割 {a.split}{'・出所 ' + a.source if a.source else ''}）")
     print()
     header = ["言語", "件数", "取りこぼし", "誤検知", "再現率", "適合率", "F1", "通知", "判定の失敗", "再現率（失敗を取りこぼしに数えた場合）", "条文の一致"]
     print("| " + " | ".join(header) + " |")
@@ -103,6 +128,34 @@ def main() -> int:
                ratio(tp, tp + fn + s["err_pos"]), f"{s['art_ok']}/{s['art_n']}"]
         rows.append(row)
         print("| " + " | ".join(str(x) for x in row) + " |")
+    # 言語による差（課題 2）: 主な 6 言語の再現率・適合率の最大と最小の差
+    def _r(s, kind):
+        tp, fn, fp = s["tp"], s["fn"], s["fp"]
+        d = tp + fn if kind == "rec" else tp + fp
+        return tp / d if d else None
+    gaps = {}
+    for kind, label in (("rec", "再現率"), ("prec", "適合率")):
+        vals = {k: _r(st[k], kind) for k in MAIN_LANGS if k in st and _r(st[k], kind) is not None}
+        if vals:
+            hi, lo = max(vals, key=vals.get), min(vals, key=vals.get)
+            gaps[kind] = vals[hi] - vals[lo]
+            print(f"\n- 言語による{label}の差: 最大 {hi} {vals[hi]:.3f} − 最小 {lo} {vals[lo]:.3f} = {gaps[kind]:.3f}", end="")
+    print()
+    if a.json:
+        a.json.parent.mkdir(parents=True, exist_ok=True)
+        out = {"provider": a.provider, "split": a.split, "source": a.source, "runs": len(runs), "by_language": {},
+               "language_gap": {"recall": gaps.get("rec"), "precision": gaps.get("prec")}}
+        for key, s in st.items():
+            tp, fn, fp = s["tp"], s["fn"], s["fp"]
+            out["by_language"][key] = {"n": s["n"], "tp": tp, "fn": fn, "fp": fp, "tn": s["tn"], "errors": s["err"],
+                                       "recall": tp / (tp + fn) if tp + fn else None,
+                                       "precision": tp / (tp + fp) if tp + fp else None,
+                                       "article_ok": s["art_ok"], "article_n": s["art_n"]}
+        ok_ = [rec["out"] for rec in first.values() if not rec["out"].get("error")]
+        lat_ = [o["latency_sec"] for o in ok_ if o.get("latency_sec") is not None]
+        out["latency_sec"] = {"p50": statistics.median(lat_) if lat_ else None, "p95": pct(lat_, 0.95) if lat_ else None}
+        out["cost_per_post_usd"] = (sum(o["cost_usd"] for o in ok_) / len(ok_)) if ok_ else None
+        a.json.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
     if a.csv:
         a.csv.parent.mkdir(parents=True, exist_ok=True)
         with open(a.csv, "w", encoding="utf-8", newline="") as f:
