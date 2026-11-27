@@ -93,8 +93,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("results", nargs="+", type=Path)
     ap.add_argument("--csv", type=Path, help="言語別の表を CSV にも書く")
-    ap.add_argument("--split", choices=["dev", "test", "all"], default="all",
-                    help="dev（調整に使った投稿）か test（調整に使っていない投稿）だけを集計する")
+    ap.add_argument("--split", choices=["dev", "test", "holdout", "all"], default="all",
+                    help="dev（調整に使った投稿）・test（調整に使っていない投稿）・holdout（追加のデータ）だけを集計する")
     ap.add_argument("--source", help="データの出所で絞る（provided＝発注者のデータ、extra_posts など）")
     ap.add_argument("--provider", help="結果に複数の方式があるとき、集計する方式（promptfooconfig の label）")
     ap.add_argument("--json", type=Path, help="全体と言語別の指標を JSON にも書く（CI のしきい値の確認・図の作成に使う）")

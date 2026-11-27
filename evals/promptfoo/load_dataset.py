@@ -70,7 +70,8 @@ def read_rows(path: Path) -> list[dict]:
 
 
 def to_testcases(rows: list[dict], article_ids: set[str]) -> list[dict]:
-    splits = assign_splits(r["scenario_id"] for r in rows)
+    # 提供のデータは dev/test に分ける。追加のデータ（O-1）は調整に一度も使わない holdout にする
+    splits = assign_splits(r["scenario_id"] for r in rows if r.get("source", "provided") == "provided")
     seen = set()
     cases = []
     for i, r in enumerate(rows, 1):
@@ -91,7 +92,7 @@ def to_testcases(rows: list[dict], article_ids: set[str]) -> list[dict]:
         vars_ = {
             "id": r["id"], "scenario_id": r["scenario_id"], "language": r["language"], "text": r["text"],
             "expected_is_violation": is_v, "expected_article": art,
-            "split": splits[r["scenario_id"]],
+            "split": splits.get(r["scenario_id"], "holdout"),
             "source": r.get("source", "provided"),
         }
         for t in TAGS:
@@ -104,7 +105,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("dataset", type=Path, nargs="+", help="データセット（複数可。2 つ目以降は追加の評価用データなど）")
     ap.add_argument("--output", type=Path, default=HERE / "datasets" / "testcases.yaml")
-    ap.add_argument("--split", choices=["dev", "test", "all"], default="all")
+    ap.add_argument("--split", choices=["dev", "test", "holdout", "all"], default="all")
     ap.add_argument("--limit", type=int)
     a = ap.parse_args()
     article_ids = {x["id"] for x in json.loads(ARTICLES.read_text(encoding="utf-8"))["articles"]}
@@ -121,8 +122,9 @@ def main() -> int:
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_text(yaml.safe_dump(cases, allow_unicode=True, sort_keys=False), encoding="utf-8")
     n_v = sum(1 for c in cases if c["vars"]["expected_is_violation"])
-    n_dev = sum(1 for c in cases if c["vars"]["split"] == "dev")
-    print(f"{len(cases)} 件（警告すべき {n_v}・警告しない {len(cases) - n_v}。dev {n_dev}・test {len(cases) - n_dev}）を {a.output} に書いた")
+    n_split = {k: sum(1 for c in cases if c["vars"]["split"] == k) for k in ("dev", "test", "holdout")}
+    print(f"{len(cases)} 件（警告すべき {n_v}・警告しない {len(cases) - n_v}。"
+          f"dev {n_split['dev']}・test {n_split['test']}・holdout {n_split['holdout']}）を {a.output} に書いた")
     return 0
 
 
